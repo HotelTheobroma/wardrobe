@@ -107,6 +107,8 @@
         .inbox-meta { color: var(--text-sub); font-size: 14px; margin-top: 10px; background: var(--bg-body); padding: 10px 14px; border-radius: 4px; white-space: pre-wrap; word-break: break-word; }
         .btn-delete-msg { background: none; border: 1px solid #E5C5C5; color: #A65A5A; font-size: 13px; padding: 5px 10px; border-radius: 4px; cursor: pointer; flex-shrink: 0; }
         .btn-delete-msg:hover { background-color: #FAF0F0; }
+        .toast { position: fixed; left: 50%; bottom: 30px; transform: translate(-50%, 20px); background: var(--text-main); color: #FFF; padding: 12px 22px; border-radius: 6px; font-size: 15px; opacity: 0; pointer-events: none; transition: all 0.3s ease; z-index: 2000; max-width: calc(100% - 32px); box-sizing: border-box; text-align: center; }
+        .toast.show { opacity: 1; transform: translate(-50%, 0); }
         .system-msg { color: #A65A5A; font-size: 15px; margin-top: 20px; min-height: 20px; }
 
         @media (max-width: 860px) {
@@ -191,6 +193,8 @@
         <div class="modal-box"><div class="modal-title">받은 선물 및 메시지</div><div class="inbox-list" id="inbox-list-area"></div><div class="modal-actions"><button class="btn-cancel" onclick="closeInboxModal()">닫기</button></div></div>
     </div>
 
+    <div class="toast" id="toast"></div>
+
 <script>
     const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycby0UQLXN92qNyLhqr8VgEQcDV7Q_rMcDaNzX9KbDskZu7RRM65TCAT8XPaKBkVhpBb5/exec';
     const MAX_MESSAGE_LENGTH = 200;
@@ -208,6 +212,7 @@
     function esc(s) {
         return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
+
     function fallbackSrc(label) {
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#F4EFE6"/><text x="50" y="55" font-size="14" text-anchor="middle" fill="#3E2723" font-family="sans-serif">${esc(label)}</text></svg>`;
         return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
@@ -216,6 +221,7 @@
     let busy = false;
     async function withBusy(fn) {
         if (busy) return;
+        localVersion++;
         busy = true; document.body.classList.add('busy');
         try { await fn(); } finally { busy = false; document.body.classList.remove('busy'); }
     }
@@ -229,6 +235,7 @@
 
     function logout() {
         sessionToken = '';
+        stopSync();
         document.getElementById('main-screen').style.display = 'none';
         document.getElementById('login-screen').style.display = 'block';
         document.getElementById('pw-input').value = '';
@@ -267,7 +274,7 @@
             document.getElementById('login-screen').style.display = 'none';
             document.getElementById('main-screen').style.display = 'block';
             msg.innerText = '';
-            updateUI(); updateInboxBadge(); renderCanvas();
+            updateUI(); updateInboxBadge(); renderCanvas(); startSync();
         } catch (error) {
             msg.innerText = '서버 연동에 실패했습니다.';
         } finally {
@@ -545,7 +552,7 @@
             </div>`).join('');
     }
 
-    function openInboxModal() { renderInbox(); document.getElementById('inbox-modal').style.display = 'flex'; }
+    function openInboxModal() { renderInbox(); document.getElementById('inbox-modal').style.display = 'flex'; syncData(); }
     function closeInboxModal() { document.getElementById('inbox-modal').style.display = 'none'; }
 
     document.getElementById('inbox-list-area').addEventListener('click', e => {
@@ -566,13 +573,67 @@
         });
     }
 
+    const SYNC_INTERVAL_MS = 20000;
+    let syncTimer = null, syncing = false;
+    let localVersion = 0;   
+
+    function startSync() {
+        stopSync();
+        syncTimer = setInterval(syncData, SYNC_INTERVAL_MS);
+    }
+    function stopSync() {
+        if (syncTimer) clearInterval(syncTimer);
+        syncTimer = null;
+    }
+
+    async function syncData() {
+        if (!sessionToken || syncing || busy || document.hidden) return;
+        syncing = true;
+        const startVersion = localVersion;
+        try {
+            const data = await api({ action: 'sync' });
+            if (!data || !data.success || busy || startVersion !== localVersion) return;
+
+            const msgKey = list => list.map(m => m.logRowIndex).join(',');
+            const newCount = data.receivedMessages.filter(m => !receivedMessages.some(o => o.logRowIndex === m.logRowIndex)).length;
+            const msgChanged = msgKey(data.receivedMessages) !== msgKey(receivedMessages);
+            const ownedChanged = data.owned.join(',') !== userData.owned.join(',');
+            const coinsChanged = data.coins !== userData.coins;
+
+            if (msgChanged) {
+                receivedMessages = data.receivedMessages;
+                updateInboxBadge();
+                if (document.getElementById('inbox-modal').style.display === 'flex') renderInbox();
+            }
+            if (ownedChanged || coinsChanged) {
+                userData.coins = data.coins;
+                userData.owned = data.owned.includes('default') ? data.owned : [...data.owned, 'default'];
+                updateUI();
+            }
+            if (newCount > 0) showToast(`새 선물이 ${newCount}개 도착했습니다. ✉`);
+        } catch (e) {
+        } finally {
+            syncing = false;
+        }
+    }
+
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) syncData(); });
+
+    function showToast(text) {
+        const t = document.getElementById('toast');
+        t.innerText = text;
+        t.classList.add('show');
+        clearTimeout(showToast._timer);
+        showToast._timer = setTimeout(() => t.classList.remove('show'), 4000);
+    }
+
     function equipItem(id) { currentClothes = id; updateUI(); renderCanvas(); }
     function equipBg(id) { currentBg = id; updateUI(); renderCanvas(); }
     function equipEyebrow(id) { currentEyebrow = id; updateUI(); renderCanvas(); }
     function equipEye(id) { currentEye = id; updateUI(); renderCanvas(); }
     function equipMouth(id) { currentMouth = id; updateUI(); renderCanvas(); }
 
-    let renderSeq = 0;   
+    let renderSeq = 0;  
 
     async function renderCanvas() {
         const mySeq = ++renderSeq;
@@ -613,7 +674,7 @@
             loadImage(eyebrowSrc), loadImage(clothesSrc), loadImage(charAssets.frontHair), loadImage(accSrc)
         ]);
 
-        if (mySeq !== renderSeq) return;   
+        if (mySeq !== renderSeq) return;   // 더 최신 렌더 요청이 있으면 이번 결과는 버림
 
         const baseImg = imgBody || imgBack || imgFront || imgClothes;
         if (baseImg) { canvas.width = baseImg.width; canvas.height = baseImg.height; } else { canvas.width = 300; canvas.height = 400; }
